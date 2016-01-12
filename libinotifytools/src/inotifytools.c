@@ -1801,6 +1801,22 @@ int inotifytools_sprintf( char * out, struct inotify_event* event, char* fmt ) {
  *               or replaced with an empty string if that function has never
  *               been called.
  *
+ * Also accepted are C89 backslash escapes:
+ *  \li \c \\### - Accepts up to three octal digits, emits corresponding character.
+ *  \li \c \\x## - Accepts two hex digits, emits corresponding character.
+ *  \li \c \\a - Emits an alert (aka bell)
+ *  \li \c \\b - Emits a backspace
+ *  \li \c \\n - Emits a newline
+ *  \li \c \\r - Emits a carriage return
+ *  \li \c \\f - Emits a form feed
+ *  \li \c \\t - Emits a horizontal tab
+ *  \li \c \\v - Emits a vertical tab
+ *
+ * Note that if an escape sequence representing a null byte is included, the
+ * returned value must be treated with care to avoid truncating it at this
+ * position.
+
+ *
  * @section example Example
  * @code
  * // suppose this is the only file watched.
@@ -1822,7 +1838,7 @@ int inotifytools_snprintf( char * out, int size,
                            struct inotify_event* event, char* fmt ) {
 	static char * filename, * eventname, * eventstr;
 	static unsigned int i, ind;
-	static char ch1;
+	static char ch, ch1;
 	static char timestr[MAX_STRLEN];
 	static time_t now;
 
@@ -1849,87 +1865,147 @@ int inotifytools_snprintf( char * out, int size,
 	ind = 0;
 	for ( i = 0; i < strlen(fmt) &&
 	             (int)ind < size - 1; ++i ) {
-		if ( fmt[i] != '%' ) {
-			out[ind++] = fmt[i];
+		ch = fmt[i];
+		if ( ch != '%' && ch != '\\') {
+			out[ind++] = ch;
 			continue;
 		}
 
 		if ( i == strlen(fmt) - 1 ) {
-			// last character is %, invalid
+			// last character is % or \, invalid
 			error = EINVAL;
 			return ind;
 		}
 
 		ch1 = fmt[i+1];
 
-		if ( ch1 == '%' ) {
-			out[ind++] = '%';
-			++i;
-			continue;
-		}
-
-		if ( ch1 == 'w' ) {
-			if ( filename ) {
-				strncpy( &out[ind], filename, size - ind );
-				ind += strlen(filename);
+		if(ch == '%') {
+			if ( ch1 == '%' ) {
+				out[ind++] = '%';
+				++i;
+				continue;
 			}
-			++i;
-			continue;
-		}
 
-		if ( ch1 == 'f' ) {
-			if ( eventname ) {
-				strncpy( &out[ind], eventname, size - ind );
-				ind += strlen(eventname);
-			}
-			++i;
-			continue;
-		}
-
-		if ( ch1 == 'e' ) {
-			eventstr = inotifytools_event_to_str( event->mask );
-			strncpy( &out[ind], eventstr, size - ind );
-			ind += strlen(eventstr);
-			++i;
-			continue;
-		}
-
-		if ( ch1 == 'T' ) {
-
-			if ( timefmt ) {
-
-				now = time(0);
-				if ( 0 >= strftime( timestr, MAX_STRLEN-1, timefmt,
-				                    localtime( &now ) ) ) {
-
-					// time format probably invalid
-					error = EINVAL;
-					return ind;
+			if ( ch1 == 'w' ) {
+				if ( filename ) {
+					strncpy( &out[ind], filename, size - ind );
+					ind += strlen(filename);
 				}
-			}
-			else {
-				timestr[0] = 0;
+				++i;
+				continue;
 			}
 
-			strncpy( &out[ind], timestr, size - ind );
-			ind += strlen(timestr);
+			if ( ch1 == 'f' ) {
+				if ( eventname ) {
+					strncpy( &out[ind], eventname, size - ind );
+					ind += strlen(eventname);
+				}
+				++i;
+				continue;
+			}
+
+			if ( ch1 == 'e' ) {
+				eventstr = inotifytools_event_to_str( event->mask );
+				strncpy( &out[ind], eventstr, size - ind );
+				ind += strlen(eventstr);
+				++i;
+				continue;
+			}
+
+			if ( ch1 == 'T' ) {
+
+				if ( timefmt ) {
+
+					now = time(0);
+					if ( 0 >= strftime( timestr, MAX_STRLEN-1, timefmt,
+							    localtime( &now ) ) ) {
+
+						// time format probably invalid
+						error = EINVAL;
+						return ind;
+					}
+				}
+				else {
+					timestr[0] = 0;
+				}
+
+				strncpy( &out[ind], timestr, size - ind );
+				ind += strlen(timestr);
+				++i;
+				continue;
+			}
+
+			// Check if next char in fmt is e
+			if ( i < strlen(fmt) - 2 && fmt[i+2] == 'e' ) {
+				eventstr = inotifytools_event_to_str_sep( event->mask, ch1 );
+				strncpy( &out[ind], eventstr, size - ind );
+				ind += strlen(eventstr);
+				i += 2;
+				continue;
+			}
+
+			// OK, this wasn't a special format character, just output it as normal
+			if ( ind < MAX_STRLEN ) out[ind++] = '%';
+			if ( ind < MAX_STRLEN ) out[ind++] = ch1;
 			++i;
-			continue;
-		}
+		} else if ( ch == '\\' ) {
 
-		// Check if next char in fmt is e
-		if ( i < strlen(fmt) - 2 && fmt[i+2] == 'e' ) {
-			eventstr = inotifytools_event_to_str_sep( event->mask, ch1 );
-			strncpy( &out[ind], eventstr, size - ind );
-			ind += strlen(eventstr);
-			i += 2;
-			continue;
-		}
+			/* \\ => single \ */
+			if ( ch1 == '\\' ) {
+				out[ind++] = '\\';
+				++i;
+				continue;
+			}
 
-		// OK, this wasn't a special format character, just output it as normal
-		if ( ind < MAX_STRLEN ) out[ind++] = '%';
-		if ( ind < MAX_STRLEN ) out[ind++] = ch1;
-		++i;
+			/* up to three octal digits */
+			if ( ch1 >= '0' && ch1 <= '7') {
+				unsigned char out_chr = 0;
+				out_chr += (fmt[i++] - '0');			/* first digit */
+				if(fmt[i + 1] >= '0' && fmt[i + 1] <= '7') {
+					out_chr *= 8;
+					out_chr += fmt[i++] - '0';		/* second digit */
+					if(fmt[i + 1] >= '0' && fmt[i + 1] <= '7') {
+						out_chr *= 8;
+						out_chr += fmt[i++] - '0';	/* third digit */
+					}
+				}
+				out[ind++] = out_chr;
+				continue;
+			}
+
+			/* exactly two hex digits */
+			if ( ch1 == 'x' ) {
+				unsigned char out_chr = 0;
+				for(int icn=0; icn<2; icn++) {
+					out_chr *= 16;
+					if(fmt[i + 1] == 0) { error = EINVAL; return ind; }
+					if(fmt[i + 1] >= '0' && fmt[i + 1] <= '9') {
+						out_chr += fmt[i + 1] - '0';
+					} else if(fmt[i + 1] >= 'a' && fmt[i + 1] <= 'f') {
+						out_chr += fmt[i + 1] - 'a';
+					} else if(fmt[i + 1] >= 'A' && fmt[i + 1] >= 'F') {
+						out_chr += fmt[i + 1] - 'A';
+					}
+					i++;
+				}
+				out[ind++] = out_chr;
+				continue;
+			}
+
+			/* C89-standardized whitespace codes */
+			if ( ch1 == 'a' ) { out[ind++] = '\a'; ++i; continue; }
+			if ( ch1 == 'b' ) { out[ind++] = '\b'; ++i; continue; }
+			if ( ch1 == 'f' ) { out[ind++] = '\f'; ++i; continue; }
+			if ( ch1 == 'n' ) { out[ind++] = '\n'; ++i; continue; }
+			if ( ch1 == 'r' ) { out[ind++] = '\r'; ++i; continue; }
+			if ( ch1 == 't' ) { out[ind++] = '\t'; ++i; continue; }
+			if ( ch1 == 'v' ) { out[ind++] = '\v'; ++i; continue; }
+
+			/* Not a recognized escape code, output as literal */
+			if ( ind < MAX_STRLEN ) out[ind++] = '\\';
+			if ( ind < MAX_STRLEN ) out[ind++] = ch1;
+			++i;
+		}
 	}
 	out[ind] = 0;
 
